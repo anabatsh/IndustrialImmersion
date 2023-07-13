@@ -252,7 +252,7 @@ class Encoding3D(nn.Module):
         phi = self.perceptron(phi)                 # [n, n, n_kernels] -> [n, n, n_heads]
         return phi
     
-def shortest_path_sequence(path, atoms_number, max_dist):
+def shortest_path_sequence(path, atoms_number, max_dist, atoms_types):
     bonds = np.zeros((atoms_number, atoms_number, max_dist), dtype=np.int64)
     atoms_to = np.broadcast_to(np.arange(atoms_number), (atoms_number, atoms_number))
     atoms_from = atoms_to.T
@@ -260,8 +260,46 @@ def shortest_path_sequence(path, atoms_number, max_dist):
     mask = path != -9999
     for k in range(1, max_dist+1):
         atoms_inner[mask] = path[atoms_from[mask], atoms_to[mask]]
-        bonds[:, :, k-1][mask] = bond_types[atoms_to[mask], atoms_inner[mask]]
+        bonds[:, :, k-1][mask] = bond_types[
+            atoms_types[atoms_to[mask]], 
+            atoms_types[atoms_inner[mask]]
+        ]
         mask *= atoms_inner != atoms_from
         atoms_to = atoms_inner.copy()
         atoms_inner[...] = 0
     return bonds
+
+# def preprocess_item(data):
+#     edge_attr, edge_index, x = data.edge_attr, data.edge_index.to(torch.int64), data.x
+#     N = x.size(0)
+#     x = convert_to_single_emb(x)
+
+#     # node adj matrix [N, N] bool
+#     adj = torch.zeros([N, N], dtype=torch.bool)
+#     adj[edge_index[0, :], edge_index[1, :]] = True
+
+#     # edge feature here
+#     if len(edge_attr.size()) == 1:
+#         edge_attr = edge_attr[:, None]
+#     attn_edge_type = torch.zeros([N, N, edge_attr.size(-1)], dtype=torch.long)
+#     attn_edge_type[edge_index[0, :], edge_index[1, :]
+#                    ] = convert_to_single_emb(edge_attr) + 1
+#     shortest_path_result, path = algos.floyd_warshall(adj.numpy())
+
+#     max_dist = np.amax(shortest_path_result)
+#     edge_input = algos.gen_edge_input(max_dist, path, attn_edge_type.numpy())
+
+#     spatial_pos = torch.from_numpy((shortest_path_result)).long()
+#     attn_bias = torch.zeros(
+#         [N + 1, N + 1], dtype=torch.float)  # with graph token
+
+#     # combine
+#     item.x = x
+#     item.attn_bias = attn_bias
+#     item.attn_edge_type = attn_edge_type
+#     item.spatial_pos = spatial_pos
+#     item.in_degree = adj.long().sum(dim=1).view(-1)
+#     item.out_degree = item.in_degree # for undirected graph
+#     item.edge_input = torch.from_numpy(edge_input).long()
+
+#     return item
