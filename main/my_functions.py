@@ -251,3 +251,17 @@ class Encoding3D(nn.Module):
         psi = self.gaussian_kernels(x, edge_types) # [n, n] -> [n, n, n_kernels]
         phi = self.perceptron(phi)                 # [n, n, n_kernels] -> [n, n, n_heads]
         return phi
+    
+def shortest_path_sequence(path, atoms_number, max_dist):
+    bonds = np.zeros((atoms_number, atoms_number, max_dist), dtype=np.int64)
+    atoms_to = np.broadcast_to(np.arange(atoms_number), (atoms_number, atoms_number))
+    atoms_from = atoms_to.T
+    atoms_inner = np.ones((atoms_number, atoms_number), dtype=np.int64)
+    mask = path != -9999
+    for k in range(1, max_dist+1):
+        atoms_inner[mask] = path[atoms_from[mask], atoms_to[mask]]
+        bonds[:, :, k-1][mask] = bond_types[atoms_to[mask], atoms_inner[mask]]
+        mask *= atoms_inner != atoms_from
+        atoms_to = atoms_inner.copy()
+        atoms_inner[...] = 0
+    return bonds
