@@ -443,9 +443,8 @@ class AttentionBlock(nn.Module):
         attn = Q @ K.transpose(-1, -2) * self.scaling # [n, n] # / np.sqrt(Q.size(-1)))
         attn = attn + phi_spd + phi_edge + phi_3d # [n, n]
         attn = F.softmax(attn, dim=-1)
-        attn = self.dropout_module(attn)#.view(self.num_heads, n, n)
+        attn = self.dropout_module(attn)
         # attn = attn.unsqueeze(-1) * delta_pos.unsqueeze(1)
-        # attn = attn.permute(0, 1, 4, 2, 3)
         attn = attn @ V # [n, d]
         return attn
 
@@ -457,9 +456,6 @@ class MultiHeadAttention(nn.Module):
             AttentionBlock(atom_feature_dim, scaling) for i in range(n_heads)
         ])
         self.W = nn.Linear(n_heads * atom_feature_dim, 1, bias=False)
-        # self.force_proj1 = nn.Linear(embed_dim, 1)
-        # self.force_proj2 = nn.Linear(embed_dim, 1)
-        # self.force_proj3 = nn.Linear(embed_dim, 1)
 
     def forward(self, x, phi_degree, phi_3d_sum, phi_3d, phi_spd, phi_edge, delta_pos=None):
         """
@@ -473,10 +469,5 @@ class MultiHeadAttention(nn.Module):
         ]
         attn = torch.cat(attn, dim=-1)
         z = self.W(attn)
-        # # f1 = self.force_proj1(x[:, :, 0, :]).view(n, 1)
-        # # f2 = self.force_proj2(x[:, :, 1, :]).view(n, 1)
-        # # f3 = self.force_proj3(x[:, :, 2, :]).view(n, 1)
-        # # z = torch.cat([f1, f2, f3], dim=-1).float()
-        # z = self.W(x)
         return z
     
