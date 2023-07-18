@@ -10,26 +10,40 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import floyd_warshall
 from fairseq_dropout import FairseqDropout
 
-
+# Number of all possible atom types
 atom_types_number = 10
-bond_types_number = atom_types_number ** 2 + 1
+# Number of all possible bond types
+bond_types_number = atom_types_number * (atom_types_number + 1) // 2 + 1
 
 def integer_symmetric_matrix(v, h, w):
+    """
+    Generate a matrix of bond types' embeddings
+    params: v, h, w - int
+    """
     m = torch.randint(v, size=(h, w))
     m = torch.tril(m, 0) + torch.tril(m, -1).T
     return m
 
 bond_types = integer_symmetric_matrix(bond_types_number, atom_types_number, atom_types_number)
 
-def generate_atoms_types(atoms_number):
-    return torch.randint(atom_types_number, size=(atoms_number,))
+def generate_atoms_types(n_atoms):
+    """
+    Generate random types for n atoms
+    """
+    return torch.randint(atom_types_number, size=(n_atoms,))
 
-def generate_atoms_features(atoms_number, atom_feature_dim):
-    return torch.randn(atoms_number, atom_feature_dim)
+def generate_atoms_features(n_atoms, atom_feature_dim):
+    """
+    Generate random features for n atoms
+    """
+    return torch.randn(n_atoms, atom_feature_dim)
 
-def generate_atoms_positions(atoms_number, std=1.0, mu_std=0.0):
+def generate_atoms_positions(n_atoms, std=1.0, mu_std=0.0):
+    """
+    Generate random positions for n atoms
+    """
     pos = [torch.rand(3)]
-    for _ in range(atoms_number - 1):
+    for _ in range(n_atoms - 1):
         pos.append((torch.rand(3) - 0.5) * 2 * std + pos[-1])
     pos = torch.vstack(pos)
     pos -= pos.mean(0)
@@ -37,6 +51,9 @@ def generate_atoms_positions(atoms_number, std=1.0, mu_std=0.0):
     return pos
 
 def generate_bonds(pos_from, pos_to, atoms_types_from, atoms_types_to, max_degree, threshold):
+    """
+    Find bonds for given atoms
+    """
     pairwise_dists = torch.cdist(pos_from, pos_to)
     pairwise_dists_tril = torch.tril(pairwise_dists)
     pairwise_dists_tril[pairwise_dists_tril == 0.0] = threshold
@@ -51,22 +68,26 @@ def generate_bonds(pos_from, pos_to, atoms_types_from, atoms_types_to, max_degre
     bonds = bond_types[atoms_types_from[atoms_from], atoms_types_to[atoms_to]]
     return atoms_from_to, dists, bonds
 
-def generate_complex(
-    protein_atoms_number,
-    ligand_atoms_number,
-    atom_feature_dim,
-    max_degree, threshold,
-    std=1.0, mu_std=0.0
-):
+def generate_complex(n_protein_atoms, n_ligand_atoms, atom_feature_dim, 
+                     max_degree, threshold, std=1.0, mu_std=1.0):
+    """
+    Generate a random protein-ligand complex
+    """
     data = HeteroData()
     
-    data['protein'].atoms = generate_atoms_types(protein_atoms_number)
-    data['protein'].x = generate_atoms_features(protein_atoms_number, atom_feature_dim)
-    data['protein'].pos = generate_atoms_positions(protein_atoms_number, std)
+    max_dist = np.sqrt(3) * std
+    if threshold <= max_dist:
+        lost_bonds = 1 - threshold / max_dist
+        print(f'More than {100 * lost_bonds:.0f}% of the bonds could have been lost.')
+        print('Increasing the threshold is recommended.')
 
-    data['ligand'].atoms = generate_atoms_types(ligand_atoms_number)
-    data['ligand'].x = generate_atoms_features(ligand_atoms_number, atom_feature_dim)
-    data['ligand'].pos = generate_atoms_positions(ligand_atoms_number, std, mu_std=mu_std)
+    data['protein'].atoms = generate_atoms_types(n_protein_atoms)
+    data['protein'].x = generate_atoms_features(n_protein_atoms, atom_feature_dim)
+    data['protein'].pos = generate_atoms_positions(n_protein_atoms, std)
+
+    data['ligand'].atoms = generate_atoms_types(n_ligand_atoms)
+    data['ligand'].x = generate_atoms_features(n_ligand_atoms, atom_feature_dim)
+    data['ligand'].pos = generate_atoms_positions(n_ligand_atoms, std, mu_std=mu_std)
 
     # protein-protein
     protein_protein, dists, bonds = generate_bonds(
@@ -98,17 +119,12 @@ def generate_complex(
     data['rmsd'] = dists.mean().item() if len(dists) else 0.0
     return data
 
-def show_complex_networx(
-        data,
-        field_name='x',
-        ligand_name='ligand',
-        protein_name='protein',
-        ligand_bond_name='-',
-        protein_bond_name='-',
-        protein_ligand_bond_name='-',
-        with_labels=True,
-        ax=None
-    ):
+def show_complex(data, field_name='x', ligand_name='ligand', protein_name='protein', 
+                 ligand_bond_name='-', protein_bond_name='-', protein_ligand_bond_name='-',
+                 with_labels=True, ax=None):
+    """
+    Display a given protein-ligand complex in the form of networkx graph
+    """
     protein_nodes = range(data[protein_name][field_name].shape[0])
     ligand_nodes = range(data[ligand_name][field_name].shape[0])
 
@@ -119,13 +135,13 @@ def show_complex_networx(
     G = nx.Graph()
 
     for node in protein_nodes:
-        G.add_node(f'{node}'+r'$_p$', label=node, color='pink')
+        G.add_node(f'{node}'+r'$_p$', label=node+1, color='pink')
     for edge in protein_protein_edges:
         edge = [f'{node}'+r'$_p$' for node in edge]
         G.add_edge(*edge, color='pink')
 
     for node in ligand_nodes:
-        G.add_node(f'{node}'+r'$_l$', label=node, color='lightskyblue')
+        G.add_node(f'{node}'+r'$_l$', label=node+1, color='lightskyblue')
     for edge in ligand_ligand_edges:
         edge = [f'{node}'+r'$_l$' for node in edge]
         G.add_edge(*edge, color='lightskyblue')
@@ -146,39 +162,31 @@ def show_complex_networx(
     if ax is None:
         plt.show()
         
-def show_complex_batch_networx(
-        batch, 
-        field_name='x',
-        ligand_name='ligand', 
-        protein_name='protein', 
-        ligand_bond_name='-', 
-        protein_bond_name='-',
-        protein_ligand_bond_name='-',
-        with_labels=True, 
-    ):
+def show_complex_batch(batch, field_name='x', ligand_name='ligand', protein_name='protein', 
+                       ligand_bond_name='-', protein_bond_name='-', protein_ligand_bond_name='-',
+                       with_labels=True):
+    """
+    Display a batch of protein-ligand complexes in the form of networkx graph
+    """
     n_5 = int(np.ceil(len(batch) / 5))
     _, axes = plt.subplots(n_5, 5, figsize=(15, 3*n_5))
     for data, ax in zip(batch, axes):
-        show_complex_networx(data, field_name, ligand_name, protein_name, 
+        show_complex(data, field_name, ligand_name, protein_name, 
                              ligand_bond_name, protein_bond_name, protein_ligand_bond_name, 
                              with_labels, ax=ax)
         ax.axis('on')
     plt.show()
 
 class ProteinLigandComplexes(Dataset):
-    def __init__(
-        self,
-        mode='train',
-        N=1000,
-        protein_atoms_number_max=20, 
-        ligand_atoms_number_max=10,
-        atom_feature_dim=8,
-        max_degree=5, threshold=1.8,
-        std=1.0, mu_std=2.0
-    ):
+    """
+    Dataset of protein-ligand complexes
+    """
+    def __init__(self, N=1000, n_protein_atoms_max=20, 
+                 n_ligand_atoms_max=10, atom_feature_dim=8, max_degree=5, 
+                 threshold=1.8, std=1.0, mu_std=2.0):
         self.N = N
-        self.protein_atoms_number_max = protein_atoms_number_max
-        self.ligand_atoms_number_max = ligand_atoms_number_max
+        self.n_protein_atoms_max = n_protein_atoms_max
+        self.n_ligand_atoms_max = n_ligand_atoms_max
         self.atom_feature_dim = atom_feature_dim
         self.max_degree = max_degree
         self.threshold = threshold
@@ -189,10 +197,10 @@ class ProteinLigandComplexes(Dataset):
         return self.N
 
     def __getitem__(self, idx):
-        protein_atoms_number = torch.randint(1, self.protein_atoms_number_max, (1,))
-        ligand_atoms_number = torch.randint(1, self.ligand_atoms_number_max, (1,))
+        n_protein_atoms = torch.randint(1, self.n_protein_atoms_max, (1,))
+        n_ligand_atoms = torch.randint(1, self.n_ligand_atoms_max, (1,))
         data = generate_complex(
-            protein_atoms_number, ligand_atoms_number, 
+            n_protein_atoms, n_ligand_atoms, 
             self.atom_feature_dim,
             self.max_degree, self.threshold, 
             self.std, self.mu_std
@@ -200,19 +208,24 @@ class ProteinLigandComplexes(Dataset):
         return data
     
 def gaussian(x, mean, std):
+    """
+    Calculate a value of a gaussian function at x
+    """
     norm_const = 1 / (torch.sqrt(2 * torch.tensor(torch.pi)) * std)
     exp_value = torch.exp(-0.5 * (((x - mean) / std) ** 2))
     return norm_const * exp_value
 
 class GaussianLayer(nn.Module):
-    def __init__(self, K=128):
+    """
+    Gaussian Basis Kernel functions
+    """
+    def __init__(self, n_kernels=128):
         """
-        K - the number of Gaussian Basis kernels
+        n_kernels - the number of Gaussian Basis kernels (K)
         """
         super().__init__()
-        self.K = K
-        self.means = nn.Embedding(1, K)
-        self.stds = nn.Embedding(1, K)
+        self.means = nn.Embedding(1, n_kernels)
+        self.stds = nn.Embedding(1, n_kernels)
         self.gamma = nn.Embedding(bond_types_number, 1, padding_idx=0)
         self.beta = nn.Embedding(bond_types_number, 1, padding_idx=0)
 
@@ -247,12 +260,10 @@ class BondEncoding3D(nn.Module):
     """
     Compute Phi3D
     """
-    def __init__(self, n_kernels=128, n_heads=1):
+    def __init__(self, n_heads, n_kernels):
         super().__init__()
-        self.n_heads = n_heads
-        self.n_kernels = n_kernels
-        self.gaussian_kernels = GaussianLayer(self.n_kernels)
-        self.perceptron = NonLinear(self.n_kernels, n_heads)
+        self.gaussian_kernels = GaussianLayer(n_kernels)
+        self.perceptron = NonLinear(n_kernels, n_heads)
 
     def forward(self, pos, edge_types):
         """
@@ -266,11 +277,14 @@ class BondEncoding3D(nn.Module):
         phi_3d = phi_3d.permute(2, 0, 1)
         return phi_3d, psi_3d
     
-def shortest_path_sequence(path, atoms_number, max_dist, atoms_types):
-    bonds = np.zeros((atoms_number, atoms_number, max_dist), dtype=np.int64)
-    atoms_to = np.broadcast_to(np.arange(atoms_number), (atoms_number, atoms_number))
+def shortest_path_sequence(path, n_atoms, max_dist, atoms_types):
+    """
+    Find sequences of the atoms in the shortest paths
+    """
+    bonds = np.zeros((n_atoms, n_atoms, max_dist), dtype=np.int64)
+    atoms_to = np.broadcast_to(np.arange(n_atoms), (n_atoms, n_atoms))
     atoms_from = atoms_to.T
-    atoms_inner = np.ones((atoms_number, atoms_number), dtype=np.int64)
+    atoms_inner = np.ones((n_atoms, n_atoms), dtype=np.int64)
     mask = path != -9999
     for k in range(1, max_dist+1):
         atoms_inner[mask] = path[atoms_from[mask], atoms_to[mask]]
@@ -284,56 +298,29 @@ def shortest_path_sequence(path, atoms_number, max_dist, atoms_types):
     return bonds.T
 
 def shortest_path(atoms, atoms_from_to):
-    atoms_number = len(atoms)
+    """
+    Compute the shortest paths
+    """
+    n_atoms = len(atoms)
     atoms_from, atoms_to = atoms_from_to
     row = atoms_from.numpy() 
     col = atoms_to.numpy() 
     is_bond = torch.ones_like(atoms_from).numpy()
-    graph = csr_matrix((is_bond, (row, col)), shape=(atoms_number, atoms_number))
+    graph = csr_matrix((is_bond, (row, col)), shape=(n_atoms, n_atoms))
     dist_matrix, path = floyd_warshall(csgraph=graph, directed=False, return_predecessors=True)
     spatial_pos = torch.from_numpy((dist_matrix)).long()
     max_dist = np.amax(dist_matrix).astype(np.int64)
     return spatial_pos, path, max_dist
 
 def shortest_path_distance(atoms, atoms_from_to):
-    atoms_number = len(atoms)
+    """
+    Compute the shortest paths and the coresponding sequences of the atoms
+    """
+    n_atoms = len(atoms)
     spatial_pos, path, max_dist = shortest_path(atoms, atoms_from_to)
-    edge_input = shortest_path_sequence(path, atoms_number, max_dist, atoms)
+    edge_input = shortest_path_sequence(path, n_atoms, max_dist, atoms)
     edge_input = torch.from_numpy(edge_input).long()
     return spatial_pos, edge_input, max_dist
-
-# def preprocess_item(data):
-#     edge_attr, edge_index, x = data.edge_attr, data.edge_index.to(torch.int64), data.x
-#     N = x.size(0)
-#     x = convert_to_single_emb(x)
-
-#     # node adj matrix [N, N] bool
-#     adj = torch.zeros([N, N], dtype=torch.bool)
-#     adj[edge_index[0, :], edge_index[1, :]] = True
-
-#     # edge feature here
-#     if len(edge_attr.size()) == 1:
-#         edge_attr = edge_attr[:, None]
-#     attn_edge_type = torch.zeros([N, N, edge_attr.size(-1)], dtype=torch.long)
-#     attn_edge_type[edge_index[0, :], edge_index[1, :]] = convert_to_single_emb(edge_attr) + 1
-#     shortest_path_result, path = algos.floyd_warshall(adj.numpy())
-
-#     max_dist = np.amax(shortest_path_result)
-#     edge_input = algos.gen_edge_input(max_dist, path, attn_edge_type.numpy())
-
-#     spatial_pos = torch.from_numpy((shortest_path_result)).long()
-#     attn_bias = torch.zeros([N + 1, N + 1], dtype=torch.float)  # with graph token
-
-#     # combine
-#     item.x = x
-#     item.attn_bias = attn_bias
-#     item.attn_edge_type = attn_edge_type
-#     item.spatial_pos = spatial_pos
-#     item.in_degree = adj.long().sum(dim=1).view(-1)
-#     item.out_degree = item.in_degree # for undirected graph
-#     item.edge_input = torch.from_numpy(edge_input).long()
-
-#     return item
 
 def init_params(module, n_layers):
     if isinstance(module, nn.Linear):
@@ -347,12 +334,12 @@ class BondEncoding2D(nn.Module):
     """
     Compute PhiSTD, PhiEdge
     """
-    def __init__(self, num_heads, num_spatial):
+    def __init__(self, n_heads, n_spatial):
         super().__init__()
-        self.num_heads = num_heads
-        self.spd_encoder = nn.Embedding(num_spatial, num_heads, padding_idx=0)
-        self.edge_encoder = nn.Embedding(bond_types_number, num_heads, padding_idx=0)
-        self.edge_dis_encoder = nn.Embedding(num_spatial * num_heads * num_heads, 1)
+        self.n_heads = n_heads
+        self.spd_encoder = nn.Embedding(n_spatial, n_heads, padding_idx=0)
+        self.edge_encoder = nn.Embedding(bond_types_number, n_heads, padding_idx=0)
+        self.edge_dis_encoder = nn.Embedding(n_spatial * n_heads * n_heads, 1)
         # self.apply(lambda module: init_params(module, n_layers=n_layers))
 
     def forward(self, atoms, atoms_from_to):
@@ -365,13 +352,13 @@ class BondEncoding2D(nn.Module):
         # [n, n, max_dist] -> [n, n, max_dist, n_heads] 
         edge_input = self.edge_encoder(edge_input)
         # [n, n, max_dist, n_heads] -> [max_dist, n, n, n_heads] -> [max_dist, n x n, n_heads]
-        edge_input_flat = edge_input.permute(2, 0, 1, 3).reshape(max_dist, -1, self.num_heads)
+        edge_input_flat = edge_input.permute(2, 0, 1, 3).reshape(max_dist, -1, self.n_heads)
         # [num_spatial x n_heads x n_heads, 1] -> [num_spatial, n_heads, n_heads] -> [max_dist, n_heads, n_heads]
-        edge_weights = self.edge_dis_encoder.weight.reshape(-1, self.num_heads, self.num_heads)[:max_dist]
+        edge_weights = self.edge_dis_encoder.weight.reshape(-1, self.n_heads, self.n_heads)[:max_dist]
         # # [max_dist, n x n, n_heads] & [max_dist, n_heads, n_heads] -> [max_dist, n x n, n_heads]
         edge_input_flat = torch.bmm(edge_input_flat, edge_weights)
         # [max_dist, n x n, n_heads] -> [max_dist, n, n, n_heads] -> [n, n, max_dist, n_heads]
-        edge_input = edge_input_flat.reshape(max_dist, n, n, self.num_heads).permute(1, 2, 0, 3)
+        edge_input = edge_input_flat.reshape(max_dist, n, n, self.n_heads).permute(1, 2, 0, 3)
         spatial_pos_ = spatial_pos.clone()
         spatial_pos_[spatial_pos_ == 0] = 1
         # [n, n] - > [n, n, 1]
@@ -384,12 +371,12 @@ class AtomEncoding2D(nn.Module):
     """
     Compute PsiDegree
     """
-    def __init__(self, num_heads, num_degree, atom_feature_dim):
+    def __init__(self, n_heads, max_degree, atom_feature_dim):
         super().__init__()
-        self.num_heads = num_heads
+        self.n_heads = n_heads
         self.atom_feature_dim = atom_feature_dim
-        self.atom_encoder = nn.Embedding(atom_types_number, atom_feature_dim * num_heads, padding_idx=0)
-        self.degree_encoder = nn.Embedding(num_degree, atom_feature_dim * num_heads, padding_idx=0)
+        self.atom_encoder = nn.Embedding(atom_types_number, atom_feature_dim * n_heads, padding_idx=0)
+        self.degree_encoder = nn.Embedding(max_degree, atom_feature_dim * n_heads, padding_idx=0)
         # self.apply(lambda module: init_params(module, n_layers=n_layers))
 
     def forward(self, atoms, degrees):
@@ -397,7 +384,7 @@ class AtomEncoding2D(nn.Module):
         # degrees - [n]
         psi_atoms = self.atom_encoder(atoms)      # [n, n_heads x d]
         psi_degree = self.degree_encoder(degrees) # [n, n_heads x d]
-        psi_degree = (psi_degree + psi_atoms).reshape(-1, self.num_heads, self.atom_feature_dim) # [n, n_heads, d]
+        psi_degree = (psi_degree + psi_atoms).reshape(-1, self.n_heads, self.atom_feature_dim) # [n, n_heads, d]
         psi_degree = psi_degree.permute(1, 0, 2)
         return psi_degree
     
@@ -405,11 +392,11 @@ class AtomEncoding3D(nn.Module):
     """
     Compute PsiSum3DDistance
     """
-    def __init__(self, num_heads, n_kernels, atom_feature_dim):
+    def __init__(self, n_heads, n_kernels, atom_feature_dim):
         super().__init__()
-        self.num_heads = num_heads
+        self.n_heads = n_heads
         self.atom_feature_dim = atom_feature_dim
-        self.W_3d = nn.Linear(n_kernels, num_heads * atom_feature_dim, bias=False)
+        self.W_3d = nn.Linear(n_kernels, n_heads * atom_feature_dim, bias=False)
         # self.apply(lambda module: init_params(module, n_layers=n_layers))
 
     def forward(self, psi_3d):
@@ -417,7 +404,7 @@ class AtomEncoding3D(nn.Module):
         # [n, n, n_kernels] -> [n, n_kernels] -> [n, n_heads x d]
         phi_3d_sum = self.W_3d(psi_3d.sum(-2))
         # [n, n_heads x d] -> [n, n_heads, d]
-        phi_3d_sum = phi_3d_sum.reshape(-1, self.num_heads, self.atom_feature_dim)
+        phi_3d_sum = phi_3d_sum.reshape(-1, self.n_heads, self.atom_feature_dim)
         # [n, n_heads, d] -> [n_heads, n, d]
         phi_3d_sum = phi_3d_sum.permute(1, 0, 2)
         return phi_3d_sum
@@ -463,13 +450,13 @@ class AttentionBlock(nn.Module):
         return attn
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, atom_feature_dim, num_heads):
+    def __init__(self, atom_feature_dim, n_heads):
         super().__init__()
-        scaling = (atom_feature_dim // num_heads) ** -0.5
+        scaling = (atom_feature_dim // n_heads) ** -0.5
         self.heads = nn.Sequential(*[
-            AttentionBlock(atom_feature_dim, scaling) for i in range(num_heads)
+            AttentionBlock(atom_feature_dim, scaling) for i in range(n_heads)
         ])
-        self.W = nn.Linear(num_heads * atom_feature_dim, 1, bias=False)
+        self.W = nn.Linear(n_heads * atom_feature_dim, 1, bias=False)
         # self.force_proj1 = nn.Linear(embed_dim, 1)
         # self.force_proj2 = nn.Linear(embed_dim, 1)
         # self.force_proj3 = nn.Linear(embed_dim, 1)
