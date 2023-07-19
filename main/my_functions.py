@@ -371,42 +371,45 @@ class AtomEncoding2D(nn.Module):
     """
     Compute PsiDegree
     """
-    def __init__(self, n_heads, max_degree, atom_feature_dim):
+    def __init__(self, max_degree, atom_feature_dim):
         super().__init__()
-        self.n_heads = n_heads
+        # self.n_heads = n_heads
         self.atom_feature_dim = atom_feature_dim
-        self.atom_encoder = nn.Embedding(atom_types_number, atom_feature_dim * n_heads, padding_idx=0)
-        self.degree_encoder = nn.Embedding(max_degree, atom_feature_dim * n_heads, padding_idx=0)
+        self.atom_encoder = nn.Embedding(atom_types_number, atom_feature_dim, padding_idx=0)
+        self.degree_encoder = nn.Embedding(max_degree, atom_feature_dim, padding_idx=0)
+        # self.atom_encoder = nn.Embedding(atom_types_number, atom_feature_dim * n_heads, padding_idx=0)
+        # self.degree_encoder = nn.Embedding(max_degree, atom_feature_dim * n_heads, padding_idx=0)
         # self.apply(lambda module: init_params(module, n_layers=n_layers))
 
     def forward(self, atoms, degrees):
         # atoms - [n]
         # degrees - [n]
-        psi_atoms = self.atom_encoder(atoms)      # [n, n_heads x d]
-        psi_degree = self.degree_encoder(degrees) # [n, n_heads x d]
-        psi_degree = (psi_degree + psi_atoms).reshape(-1, self.n_heads, self.atom_feature_dim) # [n, n_heads, d]
-        psi_degree = psi_degree.permute(1, 0, 2)
+        psi_atoms = self.atom_encoder(atoms)      # [n, d]
+        psi_degree = self.degree_encoder(degrees) # [n, d]
+        psi_degree = psi_degree + psi_atoms
+        # psi_degree = (psi_degree + psi_atoms).reshape(-1, self.n_heads, self.atom_feature_dim) # [n, n_heads, d]
+        # psi_degree = psi_degree.permute(1, 0, 2)
         return psi_degree
     
 class AtomEncoding3D(nn.Module):
     """
     Compute PsiSum3DDistance
     """
-    def __init__(self, n_heads, n_kernels, atom_feature_dim):
+    def __init__(self, n_kernels, atom_feature_dim):
         super().__init__()
-        self.n_heads = n_heads
+        # self.n_heads = n_heads
         self.atom_feature_dim = atom_feature_dim
-        self.W_3d = nn.Linear(n_kernels, n_heads * atom_feature_dim, bias=False)
+        self.W_3d = nn.Linear(n_kernels, atom_feature_dim, bias=False)
+        # self.W_3d = nn.Linear(n_kernels, n_heads * atom_feature_dim, bias=False)
         # self.apply(lambda module: init_params(module, n_layers=n_layers))
 
     def forward(self, psi_3d):
         # psi_3d - [n, n, n_kernels]
-        # [n, n, n_kernels] -> [n, n_kernels] -> [n, n_heads x d]
+        # [n, n, n_kernels] -> [n, n_kernels] -> [n, d]
         phi_3d_sum = self.W_3d(psi_3d.sum(-2))
-        # [n, n_heads x d] -> [n, n_heads, d]
-        phi_3d_sum = phi_3d_sum.reshape(-1, self.n_heads, self.atom_feature_dim)
+        # phi_3d_sum = phi_3d_sum.reshape(-1, self.n_heads, self.atom_feature_dim)
         # [n, n_heads, d] -> [n_heads, n, d]
-        phi_3d_sum = phi_3d_sum.permute(1, 0, 2)
+        # phi_3d_sum = phi_3d_sum.permute(1, 0, 2)
         return phi_3d_sum
 
 class Dropout(nn.Module):
@@ -431,12 +434,11 @@ class AttentionBlock(nn.Module):
         self.V = nn.Linear(atom_feature_dim, atom_feature_dim, bias=False)
         self.dropout_module = Dropout(0.1, module_name=self.__class__.__name__)
 
-    def forward(self, x, phi_degree, phi_3d_sum, phi_3d, phi_spd, phi_edge, delta_pos=None):
+    def forward(self, x, phi_3d, phi_spd, phi_edge, delta_pos):
         """
         x - [n, d]
-        phi_degree, phi_3d_sum, phi_3d, phi_spd, phi_edge - [n, n]
+        phi_3d, phi_spd, phi_edge - [n, n]
         """
-        x = x + phi_degree + phi_3d_sum
         Q = self.Q(x) # [n, d]
         K = self.K(x) # [n, d]
         V = self.V(x) # [n, d]
@@ -449,25 +451,100 @@ class AttentionBlock(nn.Module):
         return attn
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, atom_feature_dim, n_heads):
+    def __init__(self, n_heads, atom_feature_dim, model_dim=1):
         super().__init__()
         scaling = (atom_feature_dim // n_heads) ** -0.5
         self.heads = nn.Sequential(*[
             AttentionBlock(atom_feature_dim, scaling) for i in range(n_heads)
         ])
-        self.W = nn.Linear(n_heads * atom_feature_dim, 1, bias=False)
+        self.W = nn.Linear(n_heads * atom_feature_dim, model_dim, bias=False)
 
-    def forward(self, x, phi_degree, phi_3d_sum, phi_3d, phi_spd, phi_edge, delta_pos=None):
+    def forward(self, x, phi_3d, phi_spd, phi_edge, delta_pos=None):
         """
         x - [n, d]
-        phi_degree, phi_3d_sum, phi_3d, phi_spd, phi_edge - [n_heads, n, n]
+        phi_3d, phi_spd, phi_edge - [n_heads, n, n]
         """
         # delta_pos - нормализованные радиус-вектора попарных расстояний между атомами [n, n, 3]
         attn = [
-            head(x, phi_degree[h], phi_3d_sum[h], phi_3d[h], phi_spd[h], phi_edge[h], delta_pos) 
+            head(x, phi_3d[h], phi_spd[h], phi_edge[h], delta_pos) 
             for h, head in enumerate(self.heads)
         ]
         attn = torch.cat(attn, dim=-1)
-        z = self.W(attn)
-        return z
+        attn = self.W(attn)
+        return attn
     
+class TransformerMLayer(nn.Module):
+    def __init__(self, n_heads, atom_feature_dim, model_dim):
+        super().__init__()
+        self.multihead_attn = MultiHeadAttention(n_heads, atom_feature_dim, model_dim)
+        self.feedforward = NonLinear(model_dim, model_dim)
+        self.norm1 = nn.LayerNorm(model_dim)
+        self.norm2 = nn.LayerNorm(model_dim)
+    
+    def forward(self, x, phi_3d, phi_spd, phi_edge):
+        """
+        x - [n, d]
+        phi_3d, phi_spd, phi_edge - [n_heads, n, d]
+        """
+        attn = self.multihead_attn(x, phi_3d, phi_spd, phi_edge)
+        x = self.norm1(x + attn)
+        z = self.feedforward(x)
+        x = self.norm2(x + z)
+        return x
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, n_heads, max_degree, n_kernels, n_spatial, atom_feature_dim):
+        super().__init__()
+        self.atom_encoder_2d = AtomEncoding2D(max_degree=max_degree, atom_feature_dim=atom_feature_dim)
+        self.atom_encoder_3d = AtomEncoding3D(n_kernels=n_kernels, atom_feature_dim=atom_feature_dim)
+        self.bond_encoder_2d = BondEncoding2D(n_heads=n_heads, n_spatial=n_spatial)
+        self.bond_encoder_3d = BondEncoding3D(n_heads=n_heads, n_kernels=n_kernels)
+
+    def forward(self, data_atoms, data_bonds):
+        """
+        data_atoms.x - atoms features
+        data_atoms.pos - atoms positions
+        data_atoms.atoms - atoms types
+        data_bonds.edge_index - bonds: [atoms from, atoms_to]
+        data_bonds.edge_attr - [bond length, bonds types]
+        """
+        n = len(data_atoms.atoms)
+        edge_types = torch.zeros(n, n).long()
+        atoms_from, atoms_to = data_bonds.edge_index
+        edge_types[atoms_from, atoms_to] = edge_types[atoms_to, atoms_from] = data_bonds.edge_attr[1]
+        degrees = (edge_types != 0).sum(1)
+
+        phi_3d, psi_3d = self.bond_encoder_3d(data_atoms.pos, edge_types)
+        phi_spd, phi_edge = self.bond_encoder_2d(data_atoms.atoms, data_bonds.edge_index)
+        phi_degree = self.atom_encoder_2d(data_atoms.atoms, degrees)
+        phi_3d_sum = self.atom_encoder_3d(psi_3d)
+
+        return {
+            'atoms': (phi_degree, phi_3d_sum),   # [n, d]
+            'bonds': (phi_3d, phi_spd, phi_edge) # [n_heads, n, n]
+        }
+
+class TransformerMEncoder(nn.Module):
+    def __init__(self, n_heads, max_degree, n_kernels, n_spatial, atom_feature_dim, n_encoder_layers):
+        super().__init__()
+        self.positional_encoder = PositionalEncoding(
+            n_heads=n_heads, max_degree=max_degree, n_kernels=n_kernels, 
+            n_spatial=n_spatial, atom_feature_dim=atom_feature_dim
+        )
+        self.transformer_m_layers = nn.Sequential(*[
+            TransformerMLayer(
+                n_heads=n_heads, atom_feature_dim=atom_feature_dim, model_dim=atom_feature_dim
+            ) for _ in range(n_encoder_layers)
+        ])
+
+    def forward(self, data_atoms, data_bonds):
+        phi = self.positional_encoder(data_atoms, data_bonds)
+        phi_degree, phi_3d_sum = phi['atoms']
+        phi_3d, phi_spd, phi_edge = phi['bonds']
+
+        x = data_atoms.x + phi_degree + phi_3d_sum
+        inner_states = [x]
+        for layer in self.transformer_m_layers:
+            x = layer(x, phi_3d, phi_spd, phi_edge)
+            inner_states.append(x)
+        return inner_states
