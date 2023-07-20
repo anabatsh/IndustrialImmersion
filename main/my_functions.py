@@ -116,7 +116,7 @@ def generate_complex(n_protein_atoms, n_ligand_atoms, atom_feature_dim,
     data['protein', '-', 'ligand'].edge_index = protein_ligand
     data['protein', '-', 'ligand'].edge_attr = (dists, bonds)
 
-    data['rmsd'] = dists.mean().item() if len(dists) else 0.0
+    data['rmsd'] = dists.mean().reshape(-1) if len(dists) else torch.tensor([0.0])
     return data
 
 def show_complex(data, field_name='x', ligand_name='ligand', protein_name='protein', 
@@ -301,12 +301,12 @@ def shortest_path(atoms, atoms_from_to):
     """
     Compute the shortest paths
     """
-    n_atoms = len(atoms)
+    n = len(atoms)
     atoms_from, atoms_to = atoms_from_to
     row = atoms_from.numpy() 
     col = atoms_to.numpy() 
     is_bond = torch.ones_like(atoms_from).numpy()
-    graph = csr_matrix((is_bond, (row, col)), shape=(n_atoms, n_atoms))
+    graph = csr_matrix((is_bond, (row, col)), shape=(n, n))
     dist_matrix, path = floyd_warshall(csgraph=graph, directed=False, return_predecessors=True)
     spatial_pos = torch.from_numpy((dist_matrix)).long()
     max_dist = np.amax(dist_matrix).astype(np.int64)
@@ -316,10 +316,15 @@ def shortest_path_distance(atoms, atoms_from_to):
     """
     Compute the shortest paths and the coresponding sequences of the atoms
     """
-    n_atoms = len(atoms)
-    spatial_pos, path, max_dist = shortest_path(atoms, atoms_from_to)
-    edge_input = shortest_path_sequence(path, n_atoms, max_dist, atoms)
-    edge_input = torch.from_numpy(edge_input).long()
+    n = len(atoms)
+    if atoms_from_to.shape[1] == 0:
+        spatial_pos = torch.zeros((n, n)).long()
+        edge_input = torch.zeros((1, n, n)).long()
+        max_dist = 1
+    else:
+        spatial_pos, path, max_dist = shortest_path(atoms, atoms_from_to)
+        edge_input = shortest_path_sequence(path, n, max_dist, atoms)
+        edge_input = torch.from_numpy(edge_input).long()
     return spatial_pos, edge_input, max_dist
 
 def init_params(module, n_layers):
@@ -347,24 +352,16 @@ class BondEncoding2D(nn.Module):
         # edge_input [n, n, max_dist]
         spatial_pos, edge_input, max_dist = shortest_path_distance(atoms, atoms_from_to)
         n = len(atoms)
-        # [n, n] -> [n, n, n_heads] -> [n_heads, n, n]
         phi_spd = self.spd_encoder(spatial_pos).permute(2, 0, 1)
-        # [n, n, max_dist] -> [n, n, max_dist, n_heads] 
         edge_input = self.edge_encoder(edge_input)
-        # [n, n, max_dist, n_heads] -> [max_dist, n, n, n_heads] -> [max_dist, n x n, n_heads]
         edge_input_flat = edge_input.permute(2, 0, 1, 3).reshape(max_dist, -1, self.n_heads)
-        # [num_spatial x n_heads x n_heads, 1] -> [num_spatial, n_heads, n_heads] -> [max_dist, n_heads, n_heads]
-        edge_weights = self.edge_dis_encoder.weight.reshape(-1, self.n_heads, self.n_heads)[:max_dist]
-        # # [max_dist, n x n, n_heads] & [max_dist, n_heads, n_heads] -> [max_dist, n x n, n_heads]
-        edge_input_flat = torch.bmm(edge_input_flat, edge_weights)
-        # [max_dist, n x n, n_heads] -> [max_dist, n, n, n_heads] -> [n, n, max_dist, n_heads]
+        edge_weights = self.edge_dis_encoder.weight.reshape(-1, self.n_heads, self.n_heads)[:max_dist] 
+        edge_input_flat = torch.bmm(edge_input_flat, edge_weights) # [max_dist, n x n, n_heads]
         edge_input = edge_input_flat.reshape(max_dist, n, n, self.n_heads).permute(1, 2, 0, 3)
         spatial_pos_ = spatial_pos.clone()
         spatial_pos_[spatial_pos_ == 0] = 1
-        # [n, n] - > [n, n, 1]
-        spatial_pos_ = spatial_pos_.float().unsqueeze(-1)
-        # [n, n, n_heads] / [n, n, 1] -> [n_heads, n, n]
-        phi_edge = (edge_input.sum(-2) / spatial_pos_).permute(2, 0, 1)
+        spatial_pos_ = spatial_pos_.float().unsqueeze(-1) # [n, n, 1]
+        phi_edge = (edge_input.sum(-2) / spatial_pos_).permute(2, 0, 1) # [n_heads, n, n]
         return phi_spd, phi_edge
     
 class AtomEncoding2D(nn.Module):
@@ -376,7 +373,7 @@ class AtomEncoding2D(nn.Module):
         # self.n_heads = n_heads
         self.atom_feature_dim = atom_feature_dim
         self.atom_encoder = nn.Embedding(atom_types_number, atom_feature_dim, padding_idx=0)
-        self.degree_encoder = nn.Embedding(max_degree, atom_feature_dim, padding_idx=0)
+        self.degree_encoder = nn.Embedding(max_degree * 100, atom_feature_dim, padding_idx=0)
         # self.atom_encoder = nn.Embedding(atom_types_number, atom_feature_dim * n_heads, padding_idx=0)
         # self.degree_encoder = nn.Embedding(max_degree, atom_feature_dim * n_heads, padding_idx=0)
         # self.apply(lambda module: init_params(module, n_layers=n_layers))
