@@ -436,18 +436,19 @@ class AttentionBlock(nn.Module):
 
     def forward(self, x, phi_3d, phi_spd, phi_edge, delta_pos):
         """
-        x - [n, d]
+        x - [n + 1, d]
         phi_3d, phi_spd, phi_edge - [n, n]
         """
-        Q = self.Q(x) # [n, d]
-        K = self.K(x) # [n, d]
-        V = self.V(x) # [n, d]
-        attn = Q @ K.transpose(-1, -2) * self.scaling # [n, n] # / np.sqrt(Q.size(-1)))
-        attn = attn + phi_spd + phi_edge + phi_3d # [n, n]
-        attn = F.softmax(attn, dim=-1)
+        Q = self.Q(x) # [n + 1, d]
+        K = self.K(x) # [n + 1, d]
+        V = self.V(x) # [n + 1, d]
+        attn = Q @ K.transpose(-1, -2) * self.scaling # [n + 1, n + 1] # / np.sqrt(Q.size(-1)))
+        stride = x.shape[0] - phi_3d.shape[0]
+        attn[stride:, stride:] += phi_spd + phi_edge + phi_3d # [n + 1, n + 1]
+        attn = F.softmax(attn, dim=-1) # [n + 1]
         attn = self.dropout_module(attn)
         # attn = attn.unsqueeze(-1) * delta_pos.unsqueeze(1)
-        attn = attn @ V # [n, d]
+        attn = attn @ V # [n + 1, d]
         return attn
 
 class MultiHeadAttention(nn.Module):
@@ -461,16 +462,16 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, x, phi_3d, phi_spd, phi_edge, delta_pos=None):
         """
-        x - [n, d]
+        x - [n + 1, d]
         phi_3d, phi_spd, phi_edge - [n_heads, n, n]
         """
         # delta_pos - нормализованные радиус-вектора попарных расстояний между атомами [n, n, 3]
         attn = [
-            head(x, phi_3d[h], phi_spd[h], phi_edge[h], delta_pos) 
+            head(x, phi_3d[h], phi_spd[h], phi_edge[h], delta_pos) # [n + 1, d]
             for h, head in enumerate(self.heads)
         ]
-        attn = torch.cat(attn, dim=-1)
-        attn = self.W(attn)
+        attn = torch.cat(attn, dim=-1) # [n + 1, n_heads x d]
+        attn = self.W(attn)            # [n + 1, d]
         return attn
     
 class TransformerMLayer(nn.Module):
@@ -483,14 +484,14 @@ class TransformerMLayer(nn.Module):
     
     def forward(self, x, phi_3d, phi_spd, phi_edge):
         """
-        x - [n, d]
+        x - [n + 1, d]
         phi_3d, phi_spd, phi_edge - [n_heads, n, d]
         """
         attn = self.multihead_attn(x, phi_3d, phi_spd, phi_edge)
         x = self.norm1(x + attn)
         z = self.feedforward(x)
         x = self.norm2(x + z)
-        return x
+        return x # [n + 1, d]
 
 class PositionalEncoding(nn.Module):
     def __init__(self, n_heads, max_degree, n_kernels, n_spatial, atom_feature_dim):
@@ -527,6 +528,7 @@ class PositionalEncoding(nn.Module):
 class TransformerMEncoder(nn.Module):
     def __init__(self, n_heads, max_degree, n_kernels, n_spatial, atom_feature_dim, n_encoder_layers):
         super().__init__()
+        self.cls_token = nn.Parameter(torch.zeros(1, atom_feature_dim))
         self.positional_encoder = PositionalEncoding(
             n_heads=n_heads, max_degree=max_degree, n_kernels=n_kernels, 
             n_spatial=n_spatial, atom_feature_dim=atom_feature_dim
@@ -542,9 +544,24 @@ class TransformerMEncoder(nn.Module):
         phi_degree, phi_3d_sum = phi['atoms']
         phi_3d, phi_spd, phi_edge = phi['bonds']
 
-        x = data_atoms.x + phi_degree + phi_3d_sum
-        inner_states = [x]
+        x = data_atoms.x + phi_degree + phi_3d_sum # [n, d]
+        x = torch.cat([self.cls_token, x]) # [n + 1, d]
+
         for layer in self.transformer_m_layers:
             x = layer(x, phi_3d, phi_spd, phi_edge)
-            inner_states.append(x)
-        return inner_states
+        return x[0] # cls_token
+
+class TransformerM(nn.Module):
+    def __init__(self, n_heads, max_degree, n_kernels, n_spatial, atom_feature_dim, n_encoder_layers):
+        super().__init__()
+        self.encoder = TransformerMEncoder(
+            n_heads=n_heads, max_degree=max_degree, n_kernels=n_kernels, 
+            n_spatial=n_spatial, atom_feature_dim=atom_feature_dim, 
+            n_encoder_layers=n_encoder_layers
+        )
+        self.regressor = nn.Linear(atom_feature_dim, 1)
+        
+    def forward(self, data_atoms, data_bonds):
+        out = self.encoder(data_atoms, data_bonds)
+        out = self.regressor(out)
+        return out
